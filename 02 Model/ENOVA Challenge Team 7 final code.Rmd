@@ -1,0 +1,298 @@
+---
+title: "ENOVA Challenga"
+author: "Saurabh Annadate"
+date: "7 February 2019"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Loading the libraries data and data imputation
+```{r}
+rm(list=ls())
+
+#Loading libraries
+library(dplyr)
+library(readr)
+library(ggplot2)
+library(lubridate)
+library(pROC)
+library(nnet)
+library(MASS)
+library(readr)
+
+
+#Reading the training and validation dataset
+training <- read_csv('../01Data/training.csv')
+validation <- read_csv('../01Data/validation.csv')
+
+
+#Removing unnecessary variables
+training_clean <- training[,-c(6,19,31,37)]
+
+#Defining the function to clean the data and create additional variables
+fun_clean <- function(df){
+
+#Imputing variables by 0
+df$bedrooms[is.na(df$bedrooms)] <-0
+summary(df$bedrooms)
+
+df$bathrooms[is.na(df$bathrooms)] <- 0
+summary(df$bathrooms)
+
+df$floors_in_unit[is.na(df$floors_in_unit)] <- 0
+summary(df$floors_in_unit)
+
+df$floors_in_building[is.na(df$floors_in_building)] <- 0
+summary(df$floors_in_building)
+
+df$basement[is.na(df$basement)] <- 0
+summary(df$basement)
+
+df$overall_inspector_score[is.na(df$overall_inspector_score)] <- mean(df$overall_inspector_score,na.rm = TRUE)
+
+
+#Imputing the data by mean by ZIPCODE
+temp <- df %>% 
+  group_by(zip_code) %>%
+  summarise(score = median(schools_in_area, na.rm = TRUE)) %>% ungroup()
+df <- df %>% left_join(., temp, by = c("zip_code" = "zip_code")) %>%
+  mutate(schools_in_area = ifelse(is.na(schools_in_area), score, schools_in_area)) %>%
+  select(-score)
+
+temp <- df %>% 
+  group_by(zip_code) %>%
+  summarise(score = median(public_transit_score, na.rm = TRUE)) %>% ungroup()
+df <- df %>% left_join(., temp, by = c("zip_code" = "zip_code")) %>%
+  mutate(public_transit_score = ifelse(is.na(public_transit_score), score, public_transit_score)) %>%
+  select(-score)
+
+temp <- df %>% 
+  group_by(zip_code) %>%
+  summarise(score = median(crime_score, na.rm = TRUE)) %>% ungroup()
+df <- df %>% left_join(., temp, by = c("zip_code" = "zip_code")) %>%
+  mutate(crime_score = ifelse(is.na(crime_score), score, crime_score)) %>%
+  select(-score)
+
+temp <- df %>% 
+  group_by(zip_code) %>%
+  summarise(score = median(culture_score, na.rm = TRUE)) %>% ungroup()
+df <- df %>% left_join(., temp, by = c("zip_code" = "zip_code")) %>%
+  mutate(culture_score = ifelse(is.na(culture_score), score, culture_score)) %>%
+  select(-score)
+
+temp <- df %>% 
+  group_by(sub_type) %>%
+  summarise(score = median(sqft, na.rm = TRUE)) %>% ungroup()
+df <- df %>% left_join(., temp, by = c("sub_type" = "sub_type")) %>%
+  mutate(sqft = ifelse(is.na(sqft), score, sqft)) %>%
+  select(-score)
+
+#Creating population growth variable
+df$pop_growth=(df$current_population-df$population_5_years_ago)/df$population_5_years_ago
+
+#Calculating date variables
+df <- df %>%
+ mutate(age = as.numeric(as.Date("2019-07-07", format="%Y-%m-%d") - build_date),
+                         remodel.yr = 2019 - year(remodel_date)) %>%
+          mutate(remodelage = ifelse(remodel.yr <= 10, 1, ifelse(remodel.yr > 10 & remodel.yr <= 20, 2, 3))) %>%
+ select(-remodel.yr)
+
+#Factoring the data
+cols <- c("zone", "sub_type", "area_type", "inspection_type", "structural_quality_grade",
+         "exterior_condition_grade", "interior_condition_grade", "utilities_grade", "damage_and_issue_grade",
+         "exterior_color", "exterior_material","remodelage")
+
+df[cols] <- lapply(df[cols], factor)
+
+#Creating damage code data
+df$damage_code[!is.na(df$damage_code)]=1
+df$damage_code[is.na(df$damage_code)]=0
+df$damage_code=as.integer(df$damage_code)
+
+df$age[is.na(df$age)]=mean(df$age,na.rm = TRUE)
+df$culture_score[is.na(df$culture_score)]=mean(df$culture_score,na.rm = TRUE)
+df$crime_score[is.na(df$crime_score)]=mean(df$crime_score,na.rm = TRUE)
+df$public_transit_score[is.na(df$public_transit_score)]=mean(df$public_transit_score,na.rm = TRUE)
+df$schools_in_area[is.na(df$schools_in_area)]=mean(df$schools_in_area,na.rm = TRUE)
+
+return(df)
+
+}
+
+
+```
+
+
+# Creating the final datasets for analysis
+```{r}
+training_clean2 <- fun_clean(training_clean)
+
+training_clean2$response_price <- training_clean2$final_price-training_clean2$investment-training_clean2$initial_price
+
+training_clean2$response_flag <- 0
+
+training_clean2$response_flag[training_clean2$response_price > 0] <- 1
+table(training_clean2$response_flag)
+
+str(training_clean2)
+
+training_clean2 <- training_clean2[,c(
+  
+'zone',
+'sub_type',
+'days_on_market',
+'area_type',
+'current_population',
+'schools_in_area',
+'public_transit_score',
+'crime_score',
+'culture_score',
+'inspection_type',
+'structural_quality_grade',
+'exterior_condition_grade',
+'interior_condition_grade',
+'utilities_grade',
+'damage_and_issue_grade',
+'overall_inspector_score',
+'sqft',
+'floors_in_building',
+'floors_in_unit',
+'bedrooms',
+'bathrooms',
+'parking',
+'basement',
+'central_hvac',
+'exterior_color',
+'exterior_material',
+'initial_price',
+'pop_growth',
+'age',
+'response_flag'
+  
+)]
+
+
+
+
+
+
+```
+
+# Classifier coding
+
+```{r}
+classifier <- glm(response_flag ~ . , data = training_clean2, family = "binomial")
+summary(classifier)
+
+TrainDataPred <- predict(classifier, newdata = training_clean2, type = 'response')
+plot.roc(training_clean2$response_flag, TrainDataPred, xlab = "Specificity")
+
+test_comp <- cbind(training_clean2, TrainDataPred)
+
+
+# Calculating CCRs for various p star values
+
+p <- seq(0, 1, 0.001)
+
+CCR <- p
+j <- 0
+
+for (i in p)
+{
+  tab1 = table(factor(training_clean2$response_flag, levels = c(0,1)),
+              factor(TrainDataPred > i, levels = c(FALSE,TRUE)))
+  
+  CCR[j] = ((tab1[1,1] / (tab1[1,1] + tab1[1,2])) + (tab1[2,2] / (tab1[2,1] + tab1[2,2])))/2
+  
+  j = j + 1
+}
+
+
+plot(p,CCR, xlim = c(0,1))
+
+#Getting the probability threshold using maximum Correct classification Rate
+
+pstar <- p[which.is.max(CCR[CCR < 1])]
+
+```
+
+# Predict on validation
+
+```{r}
+validation2 <- fun_clean(validation)
+TestDataPred <- predict(classifier, newdata = validation2, type = 'response')
+validation_comp <- cbind(validation2, TestDataPred)
+write.csv(validation_comp,'Prediction_score.csv')
+
+```
+
+# Fitting linear model
+
+```{r}
+training_clean2 <- fun_clean(training_clean)
+
+training_lm <- training_clean2[,c(
+
+'zone',
+'sub_type',
+'days_on_market',
+'area_type',
+'current_population',
+'schools_in_area',
+'public_transit_score',
+'crime_score',
+'culture_score',
+'inspection_type',
+'structural_quality_grade',
+'exterior_condition_grade',
+'interior_condition_grade',
+'utilities_grade',
+'damage_and_issue_grade',
+'overall_inspector_score',
+'sqft',
+'floors_in_building',
+'floors_in_unit',
+'bedrooms',
+'bathrooms',
+'parking',
+'basement',
+'central_hvac',
+'exterior_color',
+'exterior_material',
+'initial_price',
+'pop_growth',
+'age',
+'final_price'
+)]
+```
+
+```{r}
+str(training_lm)
+any(sapply(training_clean2, is.na))
+colnames(training_lm)[colSums(is.na(training_lm)) > 0]
+lm.model <- lm(final_price ~ ., data = training_lm)
+summary(lm.model)
+
+stepAIC(lm.model, direction = "backward")
+
+step.lm <- lm(formula = final_price ~ zone + sub_type + area_type + current_population + 
+    schools_in_area + public_transit_score + crime_score + culture_score + 
+    structural_quality_grade +  
+    floors_in_unit + bedrooms + bathrooms + parking + basement + 
+    central_hvac + initial_price + pop_growth + age , 
+    data = training_lm)
+summary(step.lm)
+
+#overall_inspector_score + floors_in_building  - removed
+```
+
+```{r}
+
+
+validation_comp2 <- predict(step.lm, validation2)
+
+```
+
